@@ -56,18 +56,17 @@ Whether for embedded development, hardware debugging, or IoT teaching demonstrat
 ### Terminal
 > Minimalist left-right split design: configuration and quick commands on the left, logs and send controls on the right.
 
-![Terminal View](src/image/1.png)
+![Terminal View](1.png)
 
 ### Statistics
 > Real-time monitoring of communication traffic and rates.
 
-![Statistics View](src/image/2.png)
+![Statistics View](2.png)
 
 ### IoT Dashboard
 > Interactive sensor data visualization panel.
 
-![IoT Dashboard](src/image/3.png)
-
+![IoT Dashboard](3.png)
 ## 🛠 Installation & Run
 
 ### Requirements
