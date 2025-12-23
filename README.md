@@ -73,8 +73,8 @@
 
 ### 1. 克隆仓库
 ```bash
-git clone https://github.com/yourusername/uart-assistant-pro.git
-cd uart-assistant-pro
+git clone https://github.com/BBBQL2021/UartDebug
+cd UartDebug
 ```
 
 ### 2. 安装依赖
@@ -91,7 +91,7 @@ python app.py
 
 ### 4. 访问应用
 打开浏览器访问：
-`http://localhost:8080` (默认端口)
+`http://localhost:5678` (默认端口)
 
 ## 📖 使用指南 (Usage)
 
