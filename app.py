@@ -41,6 +41,12 @@ class SerialManager:
         self.rx_encoding = "utf-8"
         self.paused = False
         self.last_ports = []
+        self.rx_buffer = bytearray()
+        self.buffer_lock = threading.Lock()
+        self.last_flush_time = time.monotonic()
+        self.flush_interval = 0.05  # 20 FPS 级别刷新，降低前端渲染压力
+        self.max_buffer_bytes = 256 * 1024  # 接收缓冲上限，避免内存被淹没
+        self.max_payload_bytes = 4096  # 单次推送大小限制，防止单包过大阻塞
         # 启动端口扫描线程
         self.scan_thread = threading.Thread(target=self._scan_ports_loop, daemon=True)
         self.scan_thread.start()
@@ -149,21 +155,77 @@ class SerialManager:
                     continue
 
                 if self.ser.in_waiting > 0:
-                    data = self.ser.read(1024)
-                    if data and self.loop:
-                        # 将接收到的数据推送到所有WS客户端
-                        if self.is_hex_mode:
-                            payload = {"type": "rx", "data": data.hex(' ')}
-                        else:
-                            payload = {"type": "rx", "data": data.decode(self.rx_encoding, errors='replace')}
-                        asyncio.run_coroutine_threadsafe(self.broadcast(payload), self.loop)
-            except:
+                    data = self.ser.read(4096)
+                    if data:
+                        self._buffer_rx(data)
+
+                now = time.monotonic()
+                if now - self.last_flush_time >= self.flush_interval:
+                    self._flush_rx_buffer_async()
+            except Exception as exc:
+                print(f"Read loop error: {exc}")
                 break
             time.sleep(0.01)
+        # 结束前冲刷残余数据
+        self._flush_rx_buffer_async(force=True)
+
+    def _buffer_rx(self, data: bytes):
+        with self.buffer_lock:
+            overflow = (len(self.rx_buffer) + len(data)) - self.max_buffer_bytes
+            if overflow > 0:
+                # 丢弃最旧的数据，保障服务可用性
+                del self.rx_buffer[:overflow]
+            self.rx_buffer.extend(data)
+
+    def _flush_rx_buffer_async(self, force: bool = False):
+        if not self.loop or not self.ws_clients:
+            with self.buffer_lock:
+                self.rx_buffer.clear()
+                self.last_flush_time = time.monotonic()
+            return
+
+        with self.buffer_lock:
+            if not self.rx_buffer and not force:
+                self.last_flush_time = time.monotonic()
+                return
+            payload_bytes = bytes(self.rx_buffer)
+            self.rx_buffer.clear()
+            self.last_flush_time = time.monotonic()
+
+        if not payload_bytes:
+            return
+
+        for idx in range(0, len(payload_bytes), self.max_payload_bytes):
+            chunk = payload_bytes[idx: idx + self.max_payload_bytes]
+            asyncio.run_coroutine_threadsafe(self._emit_rx_chunk(chunk), self.loop)
+
+    async def _emit_rx_chunk(self, chunk: bytes):
+        if not chunk:
+            return
+        try:
+            if self.is_hex_mode:
+                data_str = chunk.hex(' ')
+            else:
+                data_str = chunk.decode(self.rx_encoding, errors='replace')
+            await self.broadcast({"type": "rx", "data": data_str})
+        except Exception as exc:
+            print(f"Dispatch rx error: {exc}")
 
     async def broadcast(self, message):
+        disconnected = []
         for ws in self.ws_clients:
-            await ws.send_json(message)
+            if ws.closed:
+                disconnected.append(ws)
+                continue
+            try:
+                await ws.send_json(message)
+            except Exception as exc:
+                print(f"WebSocket send error: {exc}")
+                disconnected.append(ws)
+
+        # 清理已关闭的连接，保持客户端集合干净
+        for ws in disconnected:
+            self.ws_clients.discard(ws)
 
 manager = SerialManager()
 
