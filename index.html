@@ -1276,6 +1276,9 @@
         
         // 启动统计定时器 (每秒更新速率图)
         rateInterval = setInterval(updateRateChart, 1000);
+        
+        // 启动 UI 刷新定时器 (每 200ms 更新统计数字和饼图，避免高频 DOM 操作)
+        setInterval(updateStatsUI, 200);
 
         // 全局快捷键监听
         document.addEventListener('keydown', handleGlobalKeydown);
@@ -1393,7 +1396,7 @@
         else indicator.classList.remove('on');
         
         // 发送命令
-        sendData(cmd + (dom.isAutoNewline.checked ? '\n' : ''));
+        sendData(cmd + (dom.isAutoNewline.checked ? '\n' : ''), false);
         appendLog('Sys', `[Dashboard] Sent: ${cmd}`);
     };
 
@@ -1407,7 +1410,7 @@
         }
         
         const cmd = `DISP:${val}`;
-        sendData(cmd + (dom.isAutoNewline.checked ? '\n' : ''));
+        sendData(cmd + (dom.isAutoNewline.checked ? '\n' : ''), false);
         appendLog('Sys', `[Dashboard] Sent: ${cmd}`);
     };
 
@@ -1629,12 +1632,11 @@
         // 尝试解析传感器数据 (仪表盘更新)
         try { parseSensorData(data); } catch(e) { console.log('Parse Error', e); }
 
-        // 统计更新
-        const byteLen = data.length; // 简单按字符长度计算，精确需后端传字节长度
+        // 统计更新 (仅更新内存数据)
+        const byteLen = data.length; 
         stats.rxBytes += byteLen;
         stats.rxBytesSec += byteLen;
         stats.rxPackets++;
-        updateStatsUI();
         
         let displayData = data;
         if (dom.isHexShow.checked) {
@@ -1759,25 +1761,85 @@
         }
     };
 
-    dom.sendBtn.onclick = sendData;
+    // 长按发送逻辑
+    let longPressTimer = null;
+    let longPressDelayTimer = null;
 
-    function sendData() {
+    function startLongPress() {
         if (!isConnected) return appendLog('Err', '设备未连接');
-        let text = dom.input.value;
-        if (!text) return;
+        sendData(); // 立即发送一次
+        
+        stopLongPress(); // 清理旧定时器
+        
+        // 200ms 后开始快速循环发送 (固定 100ms 间隔)
+        longPressDelayTimer = setTimeout(() => {
+            const interval = 100;
+            // 使用箭头函数确保不传递额外参数
+            longPressTimer = setInterval(() => sendData(), interval);
+        }, 200);
+    }
 
-        const isHex = dom.isHex.checked;
+    function stopLongPress() {
+        if (longPressDelayTimer) {
+            clearTimeout(longPressDelayTimer);
+            longPressDelayTimer = null;
+        }
+        if (longPressTimer) {
+            clearInterval(longPressTimer);
+            longPressTimer = null;
+        }
+    }
+
+    // 绑定长按事件 (移除原 onclick)
+    dom.sendBtn.onclick = null;
+    dom.sendBtn.addEventListener('mousedown', (e) => {
+        if(e.button !== 0) return;
+        startLongPress();
+    });
+    dom.sendBtn.addEventListener('mouseup', stopLongPress);
+    dom.sendBtn.addEventListener('mouseleave', stopLongPress);
+    dom.sendBtn.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        startLongPress();
+    });
+    dom.sendBtn.addEventListener('touchend', stopLongPress);
+
+    function sendData(data, isHexMode) {
+        if (!isConnected) return appendLog('Err', '设备未连接');
+        
+        let text;
+        let isHex;
+
+        // 只有当 data 明确不为 undefined 且不为 null 时，才认为是参数传递模式
+        // 注意：setInterval 可能会传递额外的参数，所以必须严格检查
+        if (typeof data !== 'undefined' && data !== null) {
+            text = data;
+            isHex = (typeof isHexMode !== 'undefined') ? isHexMode : dom.isHex.checked;
+        } else {
+            // 否则读取输入框 (常规模式/循环发送)
+            text = dom.input.value;
+            isHex = dom.isHex.checked;
+        }
+
+        if (!text && text !== '') return; // 允许空字符串? 不允许。
+
         if (dom.isAutoNewline.checked && !isHex) text += "\r\n";
 
-        // 统计更新
+        // 统计更新 (仅更新内存数据，UI由定时器刷新)
         const byteLen = text.length;
         stats.txBytes += byteLen;
         stats.txBytesSec += byteLen;
         stats.txPackets++;
-        updateStatsUI();
-
+        
         ws.send(JSON.stringify({ cmd: "send", data: text, isHex: isHex }));
-        appendLog('TX', isHex ? `[HEX] ${text}` : text);
+        
+        // 高速发送时(间隔<50ms)，为了性能不打印 TX 日志
+        const interval = parseInt(dom.interval.value) || 0;
+        const isHighSpeed = (autoSendTimer || longPressTimer) && interval < 50;
+        
+        if (!isHighSpeed) {
+            appendLog('TX', isHex ? `[HEX] ${text}` : text);
+        }
     }
 
     dom.autoSendBtn.onclick = () => {
@@ -1791,7 +1853,8 @@
             if (!isConnected) return appendLog('Err', '请先连接串口');
             const interval = parseInt(dom.interval.value) || 1000;
             sendData();
-            autoSendTimer = setInterval(sendData, interval);
+            // 使用箭头函数确保不传递额外参数
+            autoSendTimer = setInterval(() => sendData(), interval);
             dom.autoSendBtn.textContent = "停止发送";
             dom.autoSendBtn.style.background = "#ff3b30";
             dom.autoSendBtn.style.color = "white";
@@ -1926,9 +1989,8 @@
 
     window.fillAndSend = (index) => {
         const cmd = savedCommands[index];
-        dom.input.value = cmd.data;
-        dom.isHex.checked = cmd.isHex;
-        sendData();
+        // 直接发送，不覆盖输入框
+        sendData(cmd.data, cmd.isHex);
     };
 
     window.deleteCmd = (e, index) => {
