@@ -39,6 +39,7 @@ class SerialManager:
         self.ws_clients = set()
         self.is_hex_mode = False
         self.rx_encoding = "utf-8"
+        self.paused = False
         self.last_ports = []
         # 启动端口扫描线程
         self.scan_thread = threading.Thread(target=self._scan_ports_loop, daemon=True)
@@ -65,6 +66,7 @@ class SerialManager:
 
     def connect(self, port, baudrate, bytesize=8, parity='None', stopbits=1, flow_control='None'):
         self.disconnect()
+        self.paused = False
         if port == "SIMULATOR":
             self.is_simulated = True
             self.running = True
@@ -142,6 +144,10 @@ class SerialManager:
     def _read_loop(self):
         while self.running and self.ser and self.ser.is_open:
             try:
+                if self.paused:
+                    time.sleep(0.1)
+                    continue
+
                 if self.ser.in_waiting > 0:
                     data = self.ser.read(1024)
                     if data and self.loop:
@@ -200,6 +206,11 @@ async def ws_handler(request):
                         manager.is_hex_mode = req['isHexShow']
                     if 'rxEncoding' in req:
                         manager.rx_encoding = str(req['rxEncoding'] or "utf-8")
+
+                elif cmd == "pause_rx":
+                    manager.paused = bool(req.get('paused', False))
+                    state_msg = "已暂停接收" if manager.paused else "已恢复接收"
+                    await ws.send_json({"type": "status", "success": True, "msg": state_msg})
 
                 elif cmd == "send":
                     raw_data = req['data']
