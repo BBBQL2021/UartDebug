@@ -41,6 +41,10 @@ class SerialManager:
         self.rx_encoding = "utf-8"
         self.paused = False
         self.last_ports = []
+        # 新增: 线程锁和可配置参数
+        self.serial_lock = threading.Lock()  # 串口访问互斥锁
+        self.rx_interval = 0.05  # 接收轮询间隔(秒), 默认50ms
+        self.tx_delay = 0.002  # 发送字节间延迟(秒), 默认2ms
         # 启动端口扫描线程
         self.scan_thread = threading.Thread(target=self._scan_ports_loop, daemon=True)
         self.scan_thread.start()
@@ -124,7 +128,10 @@ class SerialManager:
             self.rx_thread.join(timeout=0.5)
         self.rx_thread = None
 
-    def send_data(self, data: bytes, delay=0.002):
+    def send_data(self, data: bytes, delay=None):
+        if delay is None:
+            delay = self.tx_delay  # 使用配置的延迟
+        
         if self.is_simulated:
             # 模拟回显
             asyncio.run_coroutine_threadsafe(self.broadcast({"type": "rx", "data": f"[SIM] Echo: {data.hex(' ')}"}), self.loop)
@@ -135,31 +142,49 @@ class SerialManager:
                 for b in data:
                     if not self.running or not self.ser or not self.ser.is_open:
                         break
-                    self.ser.write(bytes([b]))
-                    time.sleep(delay) # 逐帧/字节发送
-                if self.ser and self.ser.is_open:
-                    self.ser.flush()
-            threading.Thread(target=_task).start()
+                    with self.serial_lock:  # 使用锁保护串口写入
+                        if self.ser and self.ser.is_open:
+                            self.ser.write(bytes([b]))
+                    time.sleep(delay)  # 逐帧/字节发送
+                # 最后flush
+                with self.serial_lock:
+                    if self.ser and self.ser.is_open:
+                        self.ser.flush()
+            threading.Thread(target=_task, daemon=True).start()
 
     def _read_loop(self):
-        while self.running and self.ser and self.ser.is_open:
+        while self.running:
             try:
+                # 检查暂停状态
                 if self.paused:
                     time.sleep(0.1)
                     continue
-
-                if self.ser.in_waiting > 0:
-                    data = self.ser.read(1024)
-                    if data and self.loop:
-                        # 将接收到的数据推送到所有WS客户端
-                        if self.is_hex_mode:
-                            payload = {"type": "rx", "data": data.hex(' ')}
-                        else:
-                            payload = {"type": "rx", "data": data.decode(self.rx_encoding, errors='replace')}
-                        asyncio.run_coroutine_threadsafe(self.broadcast(payload), self.loop)
-            except:
+                
+                # 检查串口是否有效
+                if not self.ser or not self.ser.is_open:
+                    break
+                
+                # 使用锁保护串口读取
+                with self.serial_lock:
+                    if self.ser and self.ser.is_open and self.ser.in_waiting > 0:
+                        data = self.ser.read(1024)
+                    else:
+                        data = None
+                
+                # 处理接收到的数据
+                if data and self.loop:
+                    # 将接收到的数据推送到所有WS客户端
+                    if self.is_hex_mode:
+                        payload = {"type": "rx", "data": data.hex(' ')}
+                    else:
+                        payload = {"type": "rx", "data": data.decode(self.rx_encoding, errors='replace')}
+                    asyncio.run_coroutine_threadsafe(self.broadcast(payload), self.loop)
+            except Exception as e:
+                print(f"Read loop error: {e}")
                 break
-            time.sleep(0.01)
+            
+            # 使用可配置的接收间隔
+            time.sleep(self.rx_interval)
 
     async def broadcast(self, message):
         for ws in self.ws_clients:
@@ -211,6 +236,20 @@ async def ws_handler(request):
                     manager.paused = bool(req.get('paused', False))
                     state_msg = "已暂停接收" if manager.paused else "已恢复接收"
                     await ws.send_json({"type": "status", "success": True, "msg": state_msg})
+                
+                elif cmd == "set_rx_interval":
+                    # 设置接收间隔 (ms -> s)
+                    interval_ms = int(req.get('interval', 50))
+                    interval_ms = max(10, min(1000, interval_ms))  # 限制范围 10-1000ms
+                    manager.rx_interval = interval_ms / 1000.0
+                    await ws.send_json({"type": "status", "success": True, "msg": f"接收间隔已设置为 {interval_ms}ms"})
+                
+                elif cmd == "set_tx_delay":
+                    # 设置发送延迟 (ms -> s)
+                    delay_ms = int(req.get('delay', 2))
+                    delay_ms = max(0, min(100, delay_ms))  # 限制范围 0-100ms
+                    manager.tx_delay = delay_ms / 1000.0
+                    await ws.send_json({"type": "status", "success": True, "msg": f"发送延迟已设置为 {delay_ms}ms"})
 
                 elif cmd == "send":
                     raw_data = req['data']
